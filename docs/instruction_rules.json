@@ -1,0 +1,35 @@
+{
+  "_comment": "しきい値・文言はすべて仮置き。旅行でのログを見てから見直す想定(仕様書のとおり根拠となる実測データは無い)。",
+  "blur": {
+    "threshold": 35,
+    "achievedThreshold": 50,
+    "text": "ピントが合っていないか、ブレています。画面をタップしてピントを合わせるか、止まってください"
+  },
+  "tilt": {
+    "thresholdDeg": 4,
+    "achievedThresholdDeg": 2,
+    "textTemplate": "水平が傾いています(約{deg}°)。水平に合わせてください"
+  },
+  "brightness": {
+    "threshold": 40,
+    "achievedThreshold": 55,
+    "text": "暗すぎるか、明るすぎます。明るさを調整してください"
+  },
+  "mainProblemThreshold": 0.4,
+  "noulThreshold": 0.5,
+  "switchDebounceMs": 1500,
+  "mainProblemText": {
+    "subject_small": "被写体が小さいです。近づくか、ズームしてください",
+    "subject_cut": "被写体が画面の端で切れています。少し引いてください",
+    "background_busy": "背景に余計な物があります。角度や立ち位置を変えてください",
+    "backlight_dark": "逆光です。立ち位置を変えて、光を背中側から当ててください",
+    "off_balance": "バランスが悪いです。被写体を三分割の線に寄せてください",
+    "obstruction": "指やストラップなどが写り込んでいます。持ち方を変えてください"
+  },
+  "noulMapping": {
+    "subject_cut": "subject_cut",
+    "distraction": "background_busy",
+    "backlight": "backlight_dark"
+  },
+  "doneText": "この構図で撮影"
+}

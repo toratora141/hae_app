@@ -1,6 +1,6 @@
 // app.js: カメラ・UI・API呼び出しを束ねるアプリ本体。
-// guide.js / analyze.js の純関数を呼び出し、DOM・カメラ・ネットワークの
-// グルーコードだけをここに置く(判定ロジックそのものはguide.jsに集約する)。
+// guide.js / analyze.js / instructions.js の純関数を呼び出し、DOM・カメラ・ネットワークの
+// グルーコードだけをここに置く(判定ロジックそのものはguide.js/instructions.jsに集約する)。
 
 import {
   parseAnswers,
@@ -8,6 +8,11 @@ import {
   resolveTemplate,
   buildInstruction,
   buildTemplateMatchQuestion,
+  buildActiveQuestions,
+  collectProbabilities,
+  expectedCell,
+  pickCurrentCell,
+  round3,
 } from "./guide.js";
 import {
   toGrayscale,
@@ -16,6 +21,7 @@ import {
   brightnessMetrics,
   brightnessScore,
   rollFromAcceleration,
+  deviationFromLevel,
   levelScore,
   frameDiff,
   createStillnessTracker,
@@ -23,6 +29,11 @@ import {
   touchDistance,
   zoomFromPinch,
 } from "./analyze.js";
+import {
+  evaluateInstruction,
+  isInstructionAchieved,
+  createInstructionSwitcher,
+} from "./instructions.js";
 
 const DEFAULTS = {
   endpoint: "https://api.codiv.ai/v1/systemone",
@@ -31,10 +42,14 @@ const DEFAULTS = {
   maxSide: 768,
   autoSend: true,
   mockMode: false,
+  questionSet: "A",
+  uiMode: "multi",
+  templateMatchEnabled: false,
 };
 
 const SETTINGS_KEY = "haeApp.settings.v1";
-const LOG_KEY = "haeApp.log.v1";
+const LOG_KEY_V1 = "haeApp.log.v1"; // 旧形式(数値のみ)。読み取り専用で維持する。
+const LOG_KEY_V2 = "haeApp.log.v2"; // イベント形式(instruction_shown/judge/shutter等)。
 
 const MIN_SEND_INTERVAL_MS = 3000;
 const RESEND_DIFF_THRESHOLD = 2; // 32px縮小グレースケールでの平均絶対差
@@ -47,13 +62,18 @@ const EMA_ALPHA = 0.35;
 const JPEG_QUALITY = 0.8;
 const LOG_THUMBNAIL_MAX_SIDE = 160; // ログに残す縮小サムネイルの長辺px
 const LOG_THUMBNAIL_QUALITY = 0.5;
+const SHUTTER_JPEG_QUALITY = 0.92;
+const SHOT_RATING_DISPLAY_MS = 3000;
+const INSTRUCTION_SWITCH_MIN_INTERVAL_MS = 1500; // instruction_rules.jsonのswitchDebounceMsと同じ仮値
 
 const REQUEST_TIMEOUT_MS = 15000;
 const REQUEST_MAX_RETRIES = 1; // タイムアウト/ネットワークエラー時のみ、最大1回だけ再送する
 const RETRY_BASE_DELAY_MS = 800;
 
-// HTTPエラー応答(4xx/5xx)を表す。認証エラー等は再送しても解決しないため
-// リトライ対象から除外する目印として使う。
+const QUESTION_SET_IDS = ["A", "B", "C"];
+const UI_MODE_IDS = ["single", "multi"];
+
+// HTTPエラー応答(4xx/5xx)を表す。ステータスを保持し、4xx時の質問セットA自動フォールバック判定に使う。
 class HttpError extends Error {
   constructor(status, bodyText) {
     super(`HTTP ${status}`);
@@ -66,10 +86,23 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function round3Deep(value) {
+  if (typeof value === "number") return round3(value);
+  if (Array.isArray(value)) return value.map(round3Deep);
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) out[k] = round3Deep(v);
+    return out;
+  }
+  return value;
+}
+
 const state = {
   settings: loadSettings(),
   templates: [],
-  questions: null,
+  questionDefs: null,
+  questionSets: null,
+  instructionRules: null,
   stream: null,
   animTimer: null,
   prevAnalyzeGray: null,
@@ -85,6 +118,7 @@ const state = {
   sendSeq: 0,
   latestSendSeq: 0,
   lastResult: null, // parseAnswers()の結果
+  lastJudgeTime: null,
   manualTemplateId: null, // nullなら自動選択
   isMoving: false,
   videoTrack: null,
@@ -93,6 +127,20 @@ const state = {
   zoomValue: 1,
   pinchStartDistance: null,
   pinchStartZoom: null,
+  // --- 質問セット/表示モード -------------------------------------------
+  effectiveQuestionSet: "A", // 4xxフォールバック後はsettings.questionSetと異なる場合がある
+  fallbackNotified: false,
+  // --- 位置の連続化(ヒステリシス) ---------------------------------------------
+  currentCell: null, // pickCurrentCell()で決めた現在マス(テンプレート判定・矢印目標に使う)
+  expectedPos: null, // expectedCell()の連続座標(矢印の起点に使う)
+  compositionTemplate: null,
+  compositionResult: null,
+  // --- 指示エンジン -----------------------------------------------------------
+  instructionSwitcher: createInstructionSwitcher(INSTRUCTION_SWITCH_MIN_INTERVAL_MS),
+  // --- 撮影 -------------------------------------------------------------------
+  shutterCounter: 0,
+  pendingShotRatingShutterId: null,
+  pendingShotRatingTimer: null,
 };
 
 const els = {};
@@ -103,16 +151,22 @@ function $(id) {
 
 function cacheEls() {
   [
-    "cameraArea", "video", "overlay", "cameraPlaceholder", "startCameraBtn", "motionPermissionBtn",
+    "appRoot", "cameraArea", "video", "overlay", "cameraPlaceholder", "startCameraBtn", "motionPermissionBtn",
+    "modeIndicator", "fallbackNotice",
     "zoomSection", "zoomSlider", "zoomValue",
+    "shutterButton", "shotRatingBand", "shotRatingUp", "shotRatingDown",
     "blurMeter", "blurValue", "brightnessMeter", "brightnessValue", "levelMeter", "levelValue",
-    "stillnessBadge", "templateChips", "instructionText", "resultPanel", "resultStatus",
-    "resultThumbnail", "resultDetails", "resultMeta", "feedbackButtons", "thumbsUp", "thumbsDown",
+    "stillnessBadge", "templateChips", "instructionText", "instructionFeedback",
+    "instructionUnderstoodBtn", "instructionUnclearBtn",
+    "resultPanel", "resultStatus", "resultThumbnail", "resultDetails", "resultMeta",
+    "feedbackButtons", "thumbsUp", "thumbsDown",
     "autoSendToggle", "judgeNowBtn", "exportLogBtn", "logCount",
-    "settingsToggle", "settingsDialog", "settingsForm", "endpointInput", "modelInput",
+    "settingsToggle", "settingsDialog", "settingsForm", "questionSetSelect", "uiModeSelect",
+    "templateMatchToggle", "endpointInput", "modelInput",
     "apiKeyInput", "maxSideInput", "settingsAutoSendToggle", "mockModeToggle",
     "testConnectionBtn", "connectionTestResult", "closeSettingsBtn",
   ].forEach((id) => (els[id] = $(id)));
+  els.appRoot = $("app");
 }
 
 // --- 設定の読み書き(APIキーはlocalStorageのみ。コード・ログには出力しない) -------
@@ -143,6 +197,9 @@ function applySettingsToForm() {
   els.settingsAutoSendToggle.checked = state.settings.autoSend;
   els.mockModeToggle.checked = state.settings.mockMode;
   els.autoSendToggle.checked = state.settings.autoSend;
+  els.questionSetSelect.value = state.settings.questionSet;
+  els.uiModeSelect.value = state.settings.uiMode;
+  els.templateMatchToggle.checked = state.settings.templateMatchEnabled;
 }
 
 function readSettingsFromForm() {
@@ -154,9 +211,19 @@ function readSettingsFromForm() {
     maxSide: Math.max(128, Math.min(2048, Number(els.maxSideInput.value) || DEFAULTS.maxSide)),
     autoSend: els.settingsAutoSendToggle.checked,
     mockMode: els.mockModeToggle.checked,
+    questionSet: QUESTION_SET_IDS.includes(els.questionSetSelect.value) ? els.questionSetSelect.value : DEFAULTS.questionSet,
+    uiMode: UI_MODE_IDS.includes(els.uiModeSelect.value) ? els.uiModeSelect.value : DEFAULTS.uiMode,
+    templateMatchEnabled: els.templateMatchToggle.checked,
   };
   saveSettings();
   els.autoSendToggle.checked = state.settings.autoSend;
+
+  // 質問セットを明示的に選び直したら、4xxフォールバック状態はリセットする。
+  state.effectiveQuestionSet = state.settings.questionSet;
+  state.fallbackNotified = false;
+  els.fallbackNotice.hidden = true;
+  applyUiModeClass();
+  updateModeIndicator();
 }
 
 function setAutoSend(value) {
@@ -166,15 +233,39 @@ function setAutoSend(value) {
   els.settingsAutoSendToggle.checked = value;
 }
 
+function applyUiModeClass() {
+  els.appRoot.classList.toggle("ui-mode-single", state.settings.uiMode === "single");
+}
+
+// 画面上部の常時表示(仕様: テスト中の質問セット/表示モードの取り違え防止)。
+function updateModeIndicator() {
+  const modeLabel = state.settings.uiMode === "single" ? "single" : "multi";
+  let text = `質問セット: ${state.effectiveQuestionSet} / 表示: ${modeLabel}`;
+  if (state.effectiveQuestionSet !== state.settings.questionSet) {
+    text += "(自動切替中)";
+  }
+  els.modeIndicator.textContent = text;
+}
+
+function showFallbackNotice(failedSet) {
+  els.fallbackNotice.textContent =
+    `質問セット${failedSet}でエラーが発生したため、このセッションではA(現行9項目)に自動的に切り替えました。`;
+  els.fallbackNotice.hidden = false;
+}
+
 // --- テンプレート/質問の読み込み --------------------------------------------
 
 async function loadStaticData() {
-  const [templates, questions] = await Promise.all([
+  const [defs, sets, templates, rules] = await Promise.all([
+    fetch("questions/defs.json").then((r) => r.json()),
+    fetch("questions/sets.json").then((r) => r.json()),
     fetch("templates.json").then((r) => r.json()),
-    fetch("questions.json").then((r) => r.json()),
+    fetch("instruction_rules.json").then((r) => r.json()),
   ]);
+  state.questionDefs = defs;
+  state.questionSets = sets;
   state.templates = templates;
-  state.questions = questions;
+  state.instructionRules = rules;
   renderTemplateChips();
 }
 
@@ -338,9 +429,9 @@ function setupMotionPermission() {
   });
 }
 
-// --- 端末内指標の計算ループ(約8fps) -------------------------------------------
+// --- 端末内指標の計算ループ(甄8fps) -------------------------------------------
 
-let analyzeCanvas, analyzeCtx, smallCanvas, smallCtx, captureCanvas, captureCtx;
+let analyzeCanvas, analyzeCtx, smallCanvas, smallCtx, captureCanvas, captureCtx, shutterCanvas, shutterCtx;
 
 function ensureOffscreenCanvases() {
   if (!analyzeCanvas) {
@@ -354,6 +445,10 @@ function ensureOffscreenCanvases() {
   if (!captureCanvas) {
     captureCanvas = document.createElement("canvas");
     captureCtx = captureCanvas.getContext("2d");
+  }
+  if (!shutterCanvas) {
+    shutterCanvas = document.createElement("canvas");
+    shutterCtx = shutterCanvas.getContext("2d");
   }
 }
 
@@ -396,6 +491,7 @@ function analyzeFrame() {
   state.isMoving = !isStill;
   updateStillnessUI(isStill);
   updateResultStaleUI();
+  refreshInstruction();
 
   if (isStill && state.settings.autoSend && !state.sending) {
     maybeSendJudgement("auto");
@@ -432,6 +528,80 @@ function updateResultStaleUI() {
   if (state.sending) {
     els.resultStatus.textContent = "更新待ち...";
   }
+}
+
+// --- 指示エンジン(docs/instructions.js)への橋渡し ------------------------------
+
+function buildInstructionContext() {
+  const parsed = state.lastResult;
+  return {
+    isStill: !state.isMoving,
+    blurScore: state.emaBlur.get(),
+    brightnessScore: state.emaBrightness.get(),
+    hasSensor: state.motionAvailable,
+    tiltDeg: state.motionAvailable && state.latestRoll !== null ? deviationFromLevel(state.latestRoll) : null,
+    questionSet: state.effectiveQuestionSet,
+    mainProblem: parsed ? parsed.mainProblem : null,
+    mainProblemRaw: parsed ? parsed.mainProblemRaw : null,
+    subjectCut: parsed ? parsed.subjectCut : null,
+    distraction: parsed ? parsed.distraction : null,
+    backlight: parsed ? parsed.backlight : null,
+    compositionResult: state.compositionResult || null,
+  };
+}
+
+// device系(ブレ・傾き・明るさ)はフレームごとに、server/composition系は判定結果が
+// 更新されたときだけ変化する。呼び出しは8fpsループ+判定成功時の両方から行う。
+function refreshInstruction() {
+  if (!state.instructionRules) return;
+
+  const context = buildInstructionContext();
+  const candidate = evaluateInstruction(context, state.instructionRules);
+
+  // 判定も一般構図メッセージも無い最初の状態は、プレースホルダーのまま何もログしない。
+  if (candidate.kind === "composition" && !candidate.text && !state.instructionSwitcher.current) {
+    els.instructionText.textContent = "被写体を認識するとガイドが表示されます";
+    els.instructionFeedback.hidden = true;
+    return;
+  }
+
+  const now = Date.now();
+  const { displayed, switched, previous, previousShownAt } = state.instructionSwitcher.update(candidate, now);
+
+  if (switched) {
+    if (previous) {
+      const achieved = isInstructionAchieved(previous, context, state.instructionRules);
+      logEvent("instruction_resolved", {
+        instructionId: previous.id,
+        result: achieved ? "achieved" : "superseded",
+        elapsedMs: previousShownAt !== null ? now - previousShownAt : null,
+      });
+    }
+    logEvent("instruction_shown", {
+      instructionId: displayed.id,
+      kind: displayed.kind,
+      text: displayed.text,
+      questionSet: state.effectiveQuestionSet,
+      uiMode: state.settings.uiMode,
+      sceneAtShown: state.lastResult ? state.lastResult.scene : null,
+      cellAtShown: state.currentCell,
+    });
+  }
+
+  renderInstruction(displayed);
+}
+
+function renderInstruction(displayed) {
+  if (!displayed) return;
+  els.instructionText.textContent = displayed.text || "";
+  els.instructionText.classList.toggle("achieved", displayed.kind === "done");
+  els.instructionFeedback.hidden = !displayed.text;
+}
+
+function sendInstructionFeedback(understood) {
+  const current = state.instructionSwitcher.current;
+  if (!current) return;
+  logEvent("instruction_feedback", { instructionId: current.id, understood });
 }
 
 // --- 判定リクエストの送信 -------------------------------------------------------
@@ -500,18 +670,54 @@ async function sendJudgement(smallGray) {
     const parsed = parseAnswers(raw);
     parsed.elapsedMs = elapsedMs;
     state.lastResult = parsed;
+    state.lastJudgeTime = new Date().toISOString();
 
-    appendLog(parsed, thumbnail);
+    updateCurrentCell(parsed);
+
+    logEvent("judge", buildJudgeEventFields(parsed, thumbnail, raw && raw.answers));
     renderResult(parsed, thumbnail);
     refreshGuidance();
   } catch (e) {
     if (mySeq === state.latestSendSeq) {
-      els.resultStatus.textContent = "判定に失敗しました: " + (e && e.message ? e.message : e);
-      els.resultPanel.classList.remove("stale");
+      handleJudgementError(e);
     }
   } finally {
     state.sending = false;
     els.judgeNowBtn.disabled = false;
+  }
+}
+
+// subject_posの確率分布から連続座標(expectedPos)を求め、ヒステリシス付きで現在マスを決める。
+// 位置が不明(しきい値未満)のときは現行どおり(マスをリセットしてunknown扱いに戻す)。
+function updateCurrentCell(parsed) {
+  if (parsed.subjectPos === null) {
+    state.currentCell = null;
+    state.expectedPos = null;
+    return;
+  }
+  state.expectedPos = expectedCell(parsed.subjectPosDistribution);
+  state.currentCell = pickCurrentCell(state.expectedPos, state.currentCell);
+}
+
+function handleJudgementError(e) {
+  els.resultStatus.textContent = "判定に失敗しました: " + (e && e.message ? e.message : e);
+  els.resultPanel.classList.remove("stale");
+
+  const failedSet = state.effectiveQuestionSet;
+  if (
+    !state.settings.mockMode &&
+    e &&
+    typeof e.status === "number" &&
+    e.status >= 400 &&
+    e.status < 500 &&
+    failedSet !== "A"
+  ) {
+    state.effectiveQuestionSet = "A";
+    updateModeIndicator();
+    if (!state.fallbackNotified) {
+      state.fallbackNotified = true;
+      showFallbackNotice(failedSet);
+    }
   }
 }
 
@@ -525,17 +731,22 @@ async function fetchWithTimeout(url, options, timeoutMs) {
   }
 }
 
-// questions.jsonの固定項目に、テンプレート一覧から都度組み立てるtemplate_matchを足したものを
-// リクエストのquestionsとして使う(テンプレートは運用中に増減し得るため)。
+function activeQuestionSetKeys() {
+  return (state.questionSets && state.questionSets[state.effectiveQuestionSet]) || [];
+}
+
+// 質問セット(sets.json)のキーだけをdefs.jsonから取り出し、template_matchが有効なら
+// (設定でONのときだけ)動的に組み立てたquestionを追加する。
 function buildRequestQuestions() {
-  return {
-    ...state.questions,
-    template_match: buildTemplateMatchQuestion(state.templates),
-  };
+  const questions = buildActiveQuestions(state.questionDefs, activeQuestionSetKeys());
+  if (state.settings.templateMatchEnabled) {
+    questions.template_match = buildTemplateMatchQuestion(state.templates);
+  }
+  return questions;
 }
 
 // api.codiv.ai へのリクエスト。タイムアウト/ネットワークエラー時のみ、
-// 短い待機を挟んで最大1回まで再送する(認証エラー等のHTTPエラー応答は再送しない)。
+// 短い待機を挿んで最大1回まで再送する(認証エラー等のHTTPエラー応答は再送しない)。
 async function realRequest(dataUrl) {
   const body = JSON.stringify({
     model: state.settings.model,
@@ -570,7 +781,9 @@ async function realRequest(dataUrl) {
   }
 
   if (lastError instanceof HttpError) {
-    throw new Error(`HTTP ${lastError.status}: ${lastError.bodyText.slice(0, 200)}`);
+    const err = new Error(`HTTP ${lastError.status}: ${lastError.bodyText.slice(0, 200)}`);
+    err.status = lastError.status;
+    throw err;
   }
   if (lastError && lastError.name === "AbortError") {
     throw new Error(`タイムアウトしました(${REQUEST_TIMEOUT_MS}ms)`);
@@ -583,46 +796,53 @@ function randChoice(obj) {
   return keys[Math.floor(Math.random() * keys.length)];
 }
 
-async function mockRequest() {
-  // ネットワークを呼ばず、questions.jsonの選択肢からランダムな疑似応答を作る。
-  await sleep(200 + Math.random() * 400);
-  const scenes = Object.keys(state.questions.scene.criteria);
-  const positions = Object.keys(state.questions.subject_pos.criteria);
-  const scene = randChoice(state.questions.scene.criteria);
-  const pos = randChoice(state.questions.subject_pos.criteria);
+function fakeChoiceAnswer(keys, picked) {
+  const probabilities = {};
+  let remaining = 1;
+  keys.forEach((k, i) => {
+    if (k === picked) return;
+    const p = i === keys.length - 1 ? remaining : Math.random() * remaining * 0.5;
+    probabilities[k] = p;
+    remaining -= p;
+  });
+  probabilities[picked] = Math.max(0.4, remaining + Math.random() * 0.3);
+  return { type: "choice", choice: picked, probabilities, confidence: probabilities[picked] };
+}
 
-  function fakeChoiceAnswer(keys, picked) {
-    const probabilities = {};
-    let remaining = 1;
-    keys.forEach((k, i) => {
-      if (k === picked) return;
-      const p = i === keys.length - 1 ? remaining : Math.random() * remaining * 0.5;
-      probabilities[k] = p;
-      remaining -= p;
-    });
-    probabilities[picked] = Math.max(0.4, remaining + Math.random() * 0.3);
-    return { type: "choice", choice: picked, probabilities, confidence: probabilities[picked] };
+// 質問定義(type: choice/score/noul)から、その型に応じた模似応答を1つ作る。
+function fakeAnswerForDef(def) {
+  if (!def) return null;
+  if (def.type === "choice") {
+    const keys = Object.keys(def.criteria || {});
+    if (keys.length === 0) return null;
+    return fakeChoiceAnswer(keys, randChoice(def.criteria));
+  }
+  if (def.type === "score") {
+    return { type: "score", score: Math.random() * 4, confidence: 0.5 };
+  }
+  if (def.type === "noul") {
+    return { type: "noul", noul: Math.random() };
+  }
+  return null;
+}
+
+async function mockRequest() {
+  // ネットワークを呼ばず、現在の質問セットに含まれるキーそれぞれについて、
+  // questions/defs.jsonの定義(type)に応じたランダムな模似応答を作る。
+  await sleep(200 + Math.random() * 400);
+
+  const answers = {};
+  for (const key of activeQuestionSetKeys()) {
+    const ans = fakeAnswerForDef(state.questionDefs ? state.questionDefs[key] : null);
+    if (ans) answers[key] = ans;
   }
 
-  const skillLevels = Object.keys(state.questions.skill_level.criteria);
-  const skillLevel = randChoice(state.questions.skill_level.criteria);
-
-  const answers = {
-    scene: fakeChoiceAnswer(scenes, scene),
-    subject_pos: fakeChoiceAnswer(positions, pos),
-    subject_size: { type: "score", score: Math.random() * 4, confidence: 0.5 },
-    hae_score: { type: "score", score: Math.random() * 4, confidence: 0.5 },
-    sns_worthy: { type: "noul", noul: Math.random() },
-    skill_level: fakeChoiceAnswer(skillLevels, skillLevel),
-    lighting_quality: { type: "score", score: Math.random() * 4, confidence: 0.5 },
-    color_harmony: { type: "score", score: Math.random() * 4, confidence: 0.5 },
-    background_clutter: { type: "score", score: Math.random() * 4, confidence: 0.5 },
-  };
-
-  const templateCriteria = buildTemplateMatchQuestion(state.templates).criteria;
-  const templateIds = Object.keys(templateCriteria);
-  if (templateIds.length > 0) {
-    answers.template_match = fakeChoiceAnswer(templateIds, randChoice(templateCriteria));
+  if (state.settings.templateMatchEnabled) {
+    const templateCriteria = buildTemplateMatchQuestion(state.templates).criteria;
+    const templateIds = Object.keys(templateCriteria);
+    if (templateIds.length > 0) {
+      answers.template_match = fakeChoiceAnswer(templateIds, randChoice(templateCriteria));
+    }
   }
 
   return {
@@ -649,16 +869,26 @@ function renderResult(parsed, thumbnail) {
     : null;
 
   const rows = [
-    ["シーン", parsed.scene ? state.questions.scene.criteria[parsed.scene] : "不明"],
-    ["被写体の位置", parsed.subjectPos ? state.questions.subject_pos.criteria[parsed.subjectPos] : "不明"],
+    ["シーン", parsed.scene ? state.questionDefs.scene.criteria[parsed.scene] : "不明"],
+    [
+      "被写体の位置(サーバー回答)",
+      parsed.subjectPos ? state.questionDefs.subject_pos.criteria[parsed.subjectPos] : "不明",
+    ],
+    ["現在マス(平滑化後)", state.currentCell ? state.questionDefs.subject_pos.criteria[state.currentCell] : "不明"],
     ["サーバー判定の構図", matchedTemplate ? matchedTemplate.name : "不明"],
     ["被写体の大きさ", parsed.subjectSize !== null ? parsed.subjectSize.toFixed(2) : "--"],
     ["映え度", parsed.haeScore !== null ? parsed.haeScore.toFixed(2) : "--"],
     ["SNS映え確率", parsed.snsWorthy !== null ? (parsed.snsWorthy * 100).toFixed(1) + "%" : "--"],
-    ["スキル感", parsed.skillLevel ? state.questions.skill_level.criteria[parsed.skillLevel] : "不明"],
+    ["スキル感", parsed.skillLevel ? state.questionDefs.skill_level.criteria[parsed.skillLevel] : "不明"],
     ["光の使い方", parsed.lightingQuality !== null ? parsed.lightingQuality.toFixed(2) : "--"],
     ["配色の統一感", parsed.colorHarmony !== null ? parsed.colorHarmony.toFixed(2) : "--"],
     ["背景のすっきり度", parsed.backgroundClutter !== null ? parsed.backgroundClutter.toFixed(2) : "--"],
+    [
+      "直すべき点",
+      parsed.mainProblem && state.questionDefs.main_problem
+        ? state.questionDefs.main_problem.criteria[parsed.mainProblem]
+        : "不明",
+    ],
   ];
   for (const [k, v] of rows) {
     const dt = document.createElement("dt");
@@ -669,7 +899,7 @@ function renderResult(parsed, thumbnail) {
     els.resultDetails.appendChild(dd);
   }
 
-  const metaParts = [];
+  const metaParts = [`質問セット: ${state.effectiveQuestionSet}`];
   if (typeof parsed.elapsedMs === "number") metaParts.push(`応答時間: ${Math.round(parsed.elapsedMs)}ms`);
   if (parsed.usage.inputTokens !== null) metaParts.push(`input_tokens: ${parsed.usage.inputTokens}`);
   els.resultMeta.textContent = metaParts.join(" / ");
@@ -681,30 +911,31 @@ function renderResult(parsed, thumbnail) {
 
 // --- 画角ガイド ------------------------------------------------------------------
 
-// テンプレートの決定優先順位: 手動選択 > サーバー判定(template_match) > 自動選択。
+// テンプレートの決定優先順位: 手動選択 > 自動選択(scene+現在マス) > サーバー判定(template_match、
+// 設定でONのときだけ)。優先順位の変更点はguide.jsのresolveTemplateのコメントを参照。
 function currentTemplate() {
   if (!state.lastResult) return null;
   return resolveTemplate(state.templates, {
     manualId: state.manualTemplateId,
-    templateMatchId: state.lastResult.templateMatch,
+    templateMatchId: state.settings.templateMatchEnabled ? state.lastResult.templateMatch : null,
     scene: state.lastResult.scene,
-    pos: state.lastResult.subjectPos,
+    pos: state.currentCell,
   });
 }
 
 function refreshGuidance() {
   const template = currentTemplate();
-  const pos = state.lastResult ? state.lastResult.subjectPos : null;
   const size = state.lastResult ? state.lastResult.subjectSize : null;
+  const result = buildInstruction(template, state.currentCell, size);
 
-  const instruction = buildInstruction(template, pos, size);
-  els.instructionText.textContent = instruction.message;
-  els.instructionText.classList.toggle("achieved", instruction.achieved);
+  state.compositionTemplate = template;
+  state.compositionResult = result;
 
-  drawOverlay(template, pos);
+  drawOverlay(template, state.currentCell, state.expectedPos);
+  refreshInstruction();
 }
 
-function drawOverlay(template, pos) {
+function drawOverlay(template, pos, expectedPos) {
   const canvas = els.overlay;
   const rect = els.video.getBoundingClientRect();
   const w = Math.max(1, Math.round(rect.width));
@@ -760,10 +991,17 @@ function drawOverlay(template, pos) {
     }
   }
 
-  if (targetRect && currentRect) {
-    const from = { x: currentRect.x + currentRect.w / 2, y: currentRect.y + currentRect.h / 2 };
+  if (targetRect) {
+    // 矢印の起点は連続座標(expectedPos)を優先する(仕様: 「矢印は期待座標から目標マスの中心へ描く」)。
+    // 連続座標が無ければ従来どおり現在マスの中心を使う。
+    let from = null;
+    if (expectedPos) {
+      from = { x: expectedPos.col * cellW + cellW / 2, y: expectedPos.row * cellH + cellH / 2 };
+    } else if (currentRect) {
+      from = { x: currentRect.x + currentRect.w / 2, y: currentRect.y + currentRect.h / 2 };
+    }
     const to = { x: targetRect.x + targetRect.w / 2, y: targetRect.y + targetRect.h / 2 };
-    if (Math.hypot(to.x - from.x, to.y - from.y) > 4) {
+    if (from && Math.hypot(to.x - from.x, to.y - from.y) > 4) {
       drawArrow(ctx, from, to);
     }
   }
@@ -788,24 +1026,46 @@ function drawArrow(ctx, from, to) {
   ctx.fill();
 }
 
-// --- ログ(端末のlocalStorageにのみ保存。サムネイル画像もこの端末内だけに残る) ------
+// --- ログ(端末のlocalStorageにのみ保存。イベント形式v2。v1は読み取り専用で維持) ------
 
-function loadLog() {
+function loadLogV2() {
   try {
-    const raw = localStorage.getItem(LOG_KEY);
+    const raw = localStorage.getItem(LOG_KEY_V2);
     return raw ? JSON.parse(raw) : [];
   } catch (e) {
     return [];
   }
 }
 
-// サムネイル画像を含めるとlocalStorageの容量上限(端末により数MB程度)に達しやすいため、
-// 保存に失敗した場合は古いレコードから間引いて再試行する(それでも失敗したらあきらめる)。
-function saveLog(log) {
+function loadLogV1() {
+  try {
+    const raw = localStorage.getItem(LOG_KEY_V1);
+    return raw ? JSON.parse(raw) : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+// 容量超過時は、まずjudgeイベントのサムネイルを古い方から間引き(仕様どおり画像を優先的に消す)、
+// それでも入らなければ古いイベントそのものを間引く。
+function saveLogV2(log) {
   let toSave = log;
+
+  for (let i = 0; i < toSave.length + 1; i++) {
+    try {
+      localStorage.setItem(LOG_KEY_V2, JSON.stringify(toSave));
+      return;
+    } catch (e) {
+      const idx = toSave.findIndex((ev) => ev.type === "judge" && ev.thumbnail);
+      if (idx === -1) break;
+      toSave = toSave.slice();
+      toSave[idx] = { ...toSave[idx], thumbnail: null };
+    }
+  }
+
   for (let attempt = 0; attempt < 6; attempt++) {
     try {
-      localStorage.setItem(LOG_KEY, JSON.stringify(toSave));
+      localStorage.setItem(LOG_KEY_V2, JSON.stringify(toSave));
       return;
     } catch (e) {
       if (toSave.length <= 1) return;
@@ -814,54 +1074,98 @@ function saveLog(log) {
   }
 }
 
-function appendLog(parsed, thumbnail) {
-  const log = loadLog();
-  const template = currentTemplate();
-  log.push({
-    time: new Date().toISOString(),
+function logEvent(type, fields) {
+  const log = loadLogV2();
+  log.push({ type, time: new Date().toISOString(), ...round3Deep(fields) });
+  saveLogV2(log);
+  updateLogCount();
+}
+
+// 実際に質問セットに含まれる項目だけをログに残す(含まれない項目はキー自体を省略する)。
+// こうしないと、質問していない項目まで「不明」として集計されてしまうため
+// (scripts/summarize_log.mjs の「質問ごとの不明割合」が意味を持つようにするための対応)。
+function buildJudgeEventFields(parsed, thumbnail, rawAnswers) {
+  const template = state.compositionTemplate;
+  const activeKeys = activeQuestionSetKeys();
+  const has = (key) => activeKeys.includes(key);
+  const probabilityKeys = state.settings.templateMatchEnabled
+    ? [...activeKeys, "template_match"]
+    : activeKeys;
+
+  const fields = {
     thumbnail: thumbnail || null,
+    model: parsed.model,
+    questionSet: state.effectiveQuestionSet,
     scene: parsed.scene,
     sceneProb: parsed.sceneProb,
     subjectPos: parsed.subjectPos,
     subjectPosProb: parsed.subjectPosProb,
+    currentCell: state.currentCell,
     subjectSize: parsed.subjectSize,
-    haeScore: parsed.haeScore,
-    snsWorthy: parsed.snsWorthy,
-    templateMatch: parsed.templateMatch,
-    templateMatchProb: parsed.templateMatchProb,
-    skillLevel: parsed.skillLevel,
-    skillLevelProb: parsed.skillLevelProb,
-    lightingQuality: parsed.lightingQuality,
-    colorHarmony: parsed.colorHarmony,
-    backgroundClutter: parsed.backgroundClutter,
     templateId: template ? template.id : null,
+    probabilities: collectProbabilities(rawAnswers, probabilityKeys),
+    responseTimeMs: typeof parsed.elapsedMs === "number" ? Math.round(parsed.elapsedMs) : null,
     deviceMetrics: {
       blur: state.emaBlur.get(),
       brightness: state.emaBrightness.get(),
       level: state.emaLevel.get(),
     },
     feedback: null,
-  });
-  saveLog(log);
-  updateLogCount();
+  };
+
+  if (has("hae_score")) fields.haeScore = parsed.haeScore;
+  if (has("sns_worthy")) fields.snsWorthy = parsed.snsWorthy;
+  if (has("skill_level")) {
+    fields.skillLevel = parsed.skillLevel;
+    fields.skillLevelProb = parsed.skillLevelProb;
+  }
+  if (has("lighting_quality")) fields.lightingQuality = parsed.lightingQuality;
+  if (has("color_harmony")) fields.colorHarmony = parsed.colorHarmony;
+  if (has("background_clutter")) fields.backgroundClutter = parsed.backgroundClutter;
+  if (has("main_problem")) {
+    fields.mainProblem = parsed.mainProblem;
+    fields.mainProblemProb = parsed.mainProblemProb;
+  }
+  if (has("subject_cut")) fields.subjectCut = parsed.subjectCut;
+  if (has("distraction")) fields.distraction = parsed.distraction;
+  if (has("backlight")) fields.backlight = parsed.backlight;
+  if (state.settings.templateMatchEnabled) {
+    fields.templateMatch = parsed.templateMatch;
+    fields.templateMatchProb = parsed.templateMatchProb;
+  }
+
+  return fields;
 }
 
 function updateLogCount() {
-  els.logCount.textContent = `記録: ${loadLog().length}件`;
+  const v2Count = loadLogV2().length;
+  const v1Count = loadLogV1().length;
+  els.logCount.textContent =
+    v1Count > 0 ? `記録: ${v2Count}件(旧形式${v1Count}件は書き出しにのみ含む)` : `記録: ${v2Count}件`;
 }
 
-function setFeedback(value) {
-  const log = loadLog();
-  if (log.length === 0) return;
-  log[log.length - 1].feedback = value;
-  saveLog(log);
+// 直近のjudgeイベントに👍/👎を記録する。
+function setJudgeFeedback(value) {
+  const log = loadLogV2();
+  for (let i = log.length - 1; i >= 0; i--) {
+    if (log[i].type === "judge") {
+      log[i].feedback = value;
+      break;
+    }
+  }
+  saveLogV2(log);
   els.thumbsUp.classList.toggle("picked", value === "up");
   els.thumbsDown.classList.toggle("picked", value === "down");
 }
 
 function exportLog() {
-  const log = loadLog();
-  const blob = new Blob([JSON.stringify(log, null, 2)], { type: "application/json" });
+  const payload = {
+    schemaVersion: 2,
+    exportedAt: new Date().toISOString(),
+    events: loadLogV2(),
+    legacyV1: loadLogV1(),
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -870,6 +1174,122 @@ function exportLog() {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+}
+
+// --- 撮影ボタン ------------------------------------------------------------------
+
+function buildLastJudgeSummary() {
+  if (!state.lastResult) return null;
+  return {
+    time: state.lastJudgeTime,
+    scene: state.lastResult.scene,
+    haeScore: typeof state.lastResult.haeScore === "number" ? round3(state.lastResult.haeScore) : null,
+    snsWorthy: typeof state.lastResult.snsWorthy === "number" ? round3(state.lastResult.snsWorthy) : null,
+    mainProblem: state.lastResult.mainProblem,
+    templateId: state.compositionTemplate ? state.compositionTemplate.id : null,
+  };
+}
+
+function primaryInstructionState(primary) {
+  if (!state.lastResult) return "unknown";
+  if (!primary) return "unknown";
+  return primary.kind === "done" ? "achieved" : "unresolved";
+}
+
+async function handleShutter() {
+  if (!els.video.videoWidth) return;
+
+  const shutterId = `shot-${Date.now()}-${state.shutterCounter++}`;
+  const primary = state.instructionSwitcher.current;
+  const primaryState = primaryInstructionState(primary);
+
+  // 撮影ボタンが押された時点でまだ未解決の指示があれば、resolved(shutter)として記録する。
+  if (primary && primary.kind !== "done") {
+    logEvent("instruction_resolved", {
+      instructionId: primary.id,
+      result: "shutter",
+      elapsedMs:
+        state.instructionSwitcher.currentShownAt !== null
+          ? Date.now() - state.instructionSwitcher.currentShownAt
+          : null,
+    });
+  }
+
+  logEvent("shutter", {
+    shutterId,
+    questionSet: state.effectiveQuestionSet,
+    uiMode: state.settings.uiMode,
+    primaryInstructionId: primary ? primary.id : null,
+    primaryState,
+    deviceMetrics: {
+      blur: state.emaBlur.get(),
+      brightness: state.emaBrightness.get(),
+      level: state.emaLevel.get(),
+    },
+    lastJudge: buildLastJudgeSummary(),
+  });
+
+  state.pendingShotRatingShutterId = shutterId;
+  showShotRatingBand();
+
+  try {
+    await captureAndShareOrDownload();
+  } catch (e) {
+    els.resultStatus.textContent = "写真の保存/共有に失敗しました: " + (e && e.message ? e.message : e);
+  }
+}
+
+// videoのフレームをvideoWidth×videoHeightでJPEG(品質0.92)にし、navigator.share({files})が
+// 使えれば共有シート、使えなければダウンロードにフォールバックする。画像はアプリ内・ログに保存しない。
+async function captureAndShareOrDownload() {
+  const vw = els.video.videoWidth;
+  const vh = els.video.videoHeight;
+  if (!vw) return;
+  shutterCanvas.width = vw;
+  shutterCanvas.height = vh;
+  shutterCtx.drawImage(els.video, 0, 0, vw, vh);
+
+  const blob = await new Promise((resolve) => shutterCanvas.toBlob(resolve, "image/jpeg", SHUTTER_JPEG_QUALITY));
+  if (!blob) throw new Error("画像の生成に失敗しました");
+
+  const filename = `photo-${Date.now()}.jpg`;
+  const file = typeof File === "function" ? new File([blob], filename, { type: "image/jpeg" }) : null;
+
+  if (file && navigator.canShare && navigator.canShare({ files: [file] }) && navigator.share) {
+    try {
+      await navigator.share({ files: [file] });
+      return;
+    } catch (e) {
+      if (e && e.name === "AbortError") return; // 共有をキャンセルしただけ
+      // それ以外の失敗はダウンロードにフォールバックする
+    }
+  }
+
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function showShotRatingBand() {
+  clearTimeout(state.pendingShotRatingTimer);
+  els.shotRatingBand.hidden = false;
+  state.pendingShotRatingTimer = setTimeout(() => {
+    els.shotRatingBand.hidden = true;
+    state.pendingShotRatingShutterId = null;
+  }, SHOT_RATING_DISPLAY_MS);
+}
+
+function rateShot(rating) {
+  if (!state.pendingShotRatingShutterId) return;
+  logEvent("shot_rating", { shutterId: state.pendingShotRatingShutterId, rating });
+  clearTimeout(state.pendingShotRatingTimer);
+  els.shotRatingBand.hidden = true;
+  state.pendingShotRatingShutterId = null;
 }
 
 // --- 接続テスト --------------------------------------------------------------
@@ -891,9 +1311,10 @@ async function testConnection() {
           model: els.modelInput.value.trim() || DEFAULTS.model,
           state: "Look at the photo.",
           questions: {
-            hae_score: state.questions
-              ? state.questions.hae_score
-              : { type: "score", instructions: "test", criteria: ["a", "b", "c", "d", "e"] },
+            hae_score:
+              state.questionDefs && state.questionDefs.hae_score
+                ? state.questionDefs.hae_score
+                : { type: "score", instructions: "test", criteria: ["a", "b", "c", "d", "e"] },
           },
         }),
       },
@@ -940,8 +1361,15 @@ function wireEvents() {
 
   els.zoomSlider.addEventListener("input", () => applyZoom(Number(els.zoomSlider.value)));
 
-  els.thumbsUp.addEventListener("click", () => setFeedback("up"));
-  els.thumbsDown.addEventListener("click", () => setFeedback("down"));
+  els.shutterButton.addEventListener("click", handleShutter);
+  els.shotRatingUp.addEventListener("click", () => rateShot("up"));
+  els.shotRatingDown.addEventListener("click", () => rateShot("down"));
+
+  els.instructionUnderstoodBtn.addEventListener("click", () => sendInstructionFeedback(true));
+  els.instructionUnclearBtn.addEventListener("click", () => sendInstructionFeedback(false));
+
+  els.thumbsUp.addEventListener("click", () => setJudgeFeedback("up"));
+  els.thumbsDown.addEventListener("click", () => setJudgeFeedback("down"));
 
   els.exportLogBtn.addEventListener("click", exportLog);
 
@@ -955,8 +1383,20 @@ async function init() {
   if (params.get("mock") === "1") {
     state.settings.mockMode = true;
   }
+  const qsParam = params.get("qs");
+  if (qsParam && QUESTION_SET_IDS.includes(qsParam)) {
+    state.settings.questionSet = qsParam; // mock=1と同様、URL指定はこのセッション限りで永続化しない
+  }
+  const uiParam = params.get("ui");
+  if (uiParam && UI_MODE_IDS.includes(uiParam)) {
+    state.settings.uiMode = uiParam;
+  }
+
+  state.effectiveQuestionSet = state.settings.questionSet;
 
   applySettingsToForm();
+  applyUiModeClass();
+  updateModeIndicator();
   wireEvents();
   setupMotionPermission();
   setupPinchZoom();

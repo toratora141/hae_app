@@ -1,0 +1,32 @@
+{
+  "A": [
+    "scene",
+    "subject_pos",
+    "subject_size",
+    "hae_score",
+    "sns_worthy",
+    "skill_level",
+    "lighting_quality",
+    "color_harmony",
+    "background_clutter"
+  ],
+  "B": [
+    "scene",
+    "subject_pos",
+    "subject_size",
+    "main_problem"
+  ],
+  "C": [
+    "scene",
+    "subject_pos",
+    "subject_size",
+    "hae_score",
+    "sns_worthy",
+    "lighting_quality",
+    "background_clutter",
+    "main_problem",
+    "subject_cut",
+    "distraction",
+    "backlight"
+  ]
+}

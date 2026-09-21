@@ -96,5 +96,42 @@
       "すっきりしている",
       "とてもすっきりしている"
     ]
+  },
+  "main_problem": {
+    "type": "choice",
+    "instructions": "この写真を良くするために、最初に直すべき点はどれか",
+    "criteria": {
+      "none": "特に直す点はない",
+      "subject_small": "被写体が小さすぎる、または遠い",
+      "subject_cut": "被写体の一部が画面の端で見切れている",
+      "background_busy": "背景にごちゃごちゃした物や余計な物が写っている",
+      "backlight_dark": "逆光や暗さで被写体が見えにくい",
+      "off_balance": "被写体の位置が不自然で、構図のバランスが悪い",
+      "obstruction": "指・ストラップ・ガラスの反射などが写り込んでいる"
+    }
+  },
+  "subject_cut": {
+    "type": "noul",
+    "instructions": "主な被写体の一部が、画面の端で切れている",
+    "criteria": {
+      "true": "被写体の頭・手足・端が画面の外に出ている",
+      "false": "被写体全体が画面内に収まっている"
+    }
+  },
+  "distraction": {
+    "type": "noul",
+    "instructions": "被写体以外に、目を引く余計な物が写っている",
+    "criteria": {
+      "true": "電線、ゴミ、人混み、看板など、被写体から注意をそらす物が目立つ",
+      "false": "背景は整理されている"
+    }
+  },
+  "backlight": {
+    "type": "noul",
+    "instructions": "逆光で被写体が暗く沈んでいる",
+    "criteria": {
+      "true": "背景が明るく、被写体が影になっている",
+      "false": "被写体に十分な光が当たっている"
+    }
   }
 }

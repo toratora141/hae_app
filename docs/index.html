@@ -17,6 +17,9 @@
 
   <p id="notice">判定時、撮影フレームを api.codiv.ai に送信します</p>
 
+  <p id="modeIndicator" aria-label="現在の質問セットと表示モード"></p>
+  <p id="fallbackNotice" hidden></p>
+
   <div id="cameraArea">
     <video id="video" playsinline autoplay muted></video>
     <canvas id="overlay"></canvas>
@@ -32,6 +35,14 @@
       <span id="zoomValue" class="metric-value">1.0x</span>
     </div>
   </section>
+
+  <button id="shutterButton" type="button">撮影する</button>
+
+  <div id="shotRatingBand" hidden>
+    <span>この写真に満足?</span>
+    <button id="shotRatingUp" type="button" aria-label="満足">👍</button>
+    <button id="shotRatingDown" type="button" aria-label="不満">👎</button>
+  </div>
 
   <button id="motionPermissionBtn" type="button" hidden>
     センサーの利用を許可(iOSのみ)
@@ -67,6 +78,10 @@
   <section id="guidancePanel" aria-label="画角ガイド">
     <div id="templateChips" role="group" aria-label="テンプレート選択"></div>
     <p id="instructionText">被写体を認識するとガイドが表示されます</p>
+    <div id="instructionFeedback" hidden>
+      <button id="instructionUnderstoodBtn" type="button">伝わった</button>
+      <button id="instructionUnclearBtn" type="button">分かりにくい</button>
+    </div>
   </section>
 
   <section id="resultPanel" aria-label="判定結果">
@@ -89,6 +104,31 @@
   <dialog id="settingsDialog">
     <form method="dialog" id="settingsForm">
       <h2>設定</h2>
+
+      <label class="field">
+        質問セット
+        <select id="questionSetSelect">
+          <option value="A">A(現行9項目)</option>
+          <option value="B">B(直すべき点 中心・軽量4項目)</option>
+          <option value="C">C(直すべき点+はい/いいえ項目・詳細11項目)</option>
+        </select>
+      </label>
+      <p class="field-note">
+        B・Cで実APIが4xxを返した場合、このセッションだけ自動的にAへ切り替わります(通知が出ます)。
+      </p>
+
+      <label class="field">
+        表示モード
+        <select id="uiModeSelect">
+          <option value="multi">multi(詳細表示)</option>
+          <option value="single">single(主指示だけ大きく表示)</option>
+        </select>
+      </label>
+
+      <label class="field-checkbox">
+        <input type="checkbox" id="templateMatchToggle" />
+        サーバーに構図マッチ(template_match)も問い合わせる(実験的・既定OFF)
+      </label>
 
       <label class="field">
         エンドポイント
