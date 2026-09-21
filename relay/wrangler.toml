@@ -1,0 +1,15 @@
+# Cloudflare Workers 設定ファイル(デプロイはしていない)。
+# 使い方はREADME.mdの「Cloudflare Workers 中継のデプロイ手順」を参照。
+
+name = "hae-app-relay"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+
+# ALLOWED_ORIGIN はGitHub Pagesのオリジンに限定することを推奨する。
+# 例: https://<your-username>.github.io
+# 未設定または "*" の場合は全オリジンを許可する(プロトタイプ用の既定値)。
+[vars]
+ALLOWED_ORIGIN = "*"
+
+# APIキーはシークレットとして別途設定すること(このファイルには書かない):
+#   wrangler secret put CODIV_API_KEY

@@ -1,0 +1,42 @@
+[
+  {
+    "id": "thirds_left",
+    "name": "三分割・左寄せ",
+    "scenes": ["food", "object", "pet"],
+    "target": { "cell": "mid_left", "size": [2, 3] },
+    "priority": 2,
+    "instruction": "被写体を画面の三分割線上、左側に配置する構図です。余白は右側に大きく取ります。"
+  },
+  {
+    "id": "thirds_right",
+    "name": "三分割・右寄せ",
+    "scenes": ["food", "object", "pet"],
+    "target": { "cell": "mid_right", "size": [2, 3] },
+    "priority": 2,
+    "instruction": "被写体を画面の三分割線上、右側に配置する構図です。余白は左側に大きく取ります。"
+  },
+  {
+    "id": "center_symmetry",
+    "name": "日の丸構図",
+    "scenes": ["object", "food", "landscape"],
+    "target": { "cell": "center", "size": [2, 4] },
+    "priority": 1,
+    "instruction": "被写体を画面中央にまとまりよく配置する「日の丸構図」です。背景をシンプルに整えると効果的です。"
+  },
+  {
+    "id": "topdown_food",
+    "name": "真上から",
+    "scenes": ["food"],
+    "target": { "cell": "center", "size": [3, 4] },
+    "priority": 3,
+    "instruction": "カメラを料理の真上に構え、皿全体が画面いっぱいに入るように近づいてください。"
+  },
+  {
+    "id": "person_thirds",
+    "name": "人物・三分割",
+    "scenes": ["person"],
+    "target": { "cell": "mid_right", "size": [2, 3] },
+    "priority": 2,
+    "instruction": "人物を画面の三分割線上、右側に配置し、視線の先に余白を残す構図です。"
+  }
+]
