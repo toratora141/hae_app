@@ -45,6 +45,8 @@ const ANALYZE_WIDTH = 128;
 const SMALL_DIFF_WIDTH = 32;
 const EMA_ALPHA = 0.35;
 const JPEG_QUALITY = 0.8;
+const LOG_THUMBNAIL_MAX_SIDE = 160; // ログに残す縮小サムネイルの長辺px
+const LOG_THUMBNAIL_QUALITY = 0.5;
 
 const REQUEST_TIMEOUT_MS = 15000;
 const REQUEST_MAX_RETRIES = 1; // タイムアウト/ネットワークエラー時のみ、最大1回だけ再送する
@@ -105,7 +107,7 @@ function cacheEls() {
     "zoomSection", "zoomSlider", "zoomValue",
     "blurMeter", "blurValue", "brightnessMeter", "brightnessValue", "levelMeter", "levelValue",
     "stillnessBadge", "templateChips", "instructionText", "resultPanel", "resultStatus",
-    "resultDetails", "resultMeta", "feedbackButtons", "thumbsUp", "thumbsDown",
+    "resultThumbnail", "resultDetails", "resultMeta", "feedbackButtons", "thumbsUp", "thumbsDown",
     "autoSendToggle", "judgeNowBtn", "exportLogBtn", "logCount",
     "settingsToggle", "settingsDialog", "settingsForm", "endpointInput", "modelInput",
     "apiKeyInput", "maxSideInput", "settingsAutoSendToggle", "mockModeToggle",
@@ -445,8 +447,8 @@ function downscaleGray(width) {
   return toGrayscale(smallCtx.getImageData(0, 0, width, h).data);
 }
 
-// 長辺maxSideにリサイズしてJPEG(quality 0.8)のdata URLにする。
-function captureDataUrl(maxSide) {
+// 長辺maxSideにリサイズしてJPEGのdata URLにする。
+function captureDataUrl(maxSide, quality = JPEG_QUALITY) {
   const vw = els.video.videoWidth;
   const vh = els.video.videoHeight;
   const scale = Math.min(1, maxSide / Math.max(vw, vh));
@@ -455,7 +457,7 @@ function captureDataUrl(maxSide) {
   captureCanvas.width = w;
   captureCanvas.height = h;
   captureCtx.drawImage(els.video, 0, 0, w, h);
-  return captureCanvas.toDataURL("image/jpeg", JPEG_QUALITY);
+  return captureCanvas.toDataURL("image/jpeg", quality);
 }
 
 async function maybeSendJudgement(trigger) {
@@ -483,6 +485,7 @@ async function sendJudgement(smallGray) {
   updateResultStaleUI();
 
   const t0 = performance.now();
+  const thumbnail = captureDataUrl(LOG_THUMBNAIL_MAX_SIDE, LOG_THUMBNAIL_QUALITY);
   try {
     const raw = state.settings.mockMode
       ? await mockRequest()
@@ -498,8 +501,8 @@ async function sendJudgement(smallGray) {
     parsed.elapsedMs = elapsedMs;
     state.lastResult = parsed;
 
-    appendLog(parsed);
-    renderResult(parsed);
+    appendLog(parsed, thumbnail);
+    renderResult(parsed, thumbnail);
     refreshGuidance();
   } catch (e) {
     if (mySeq === state.latestSendSeq) {
@@ -631,10 +634,15 @@ async function mockRequest() {
 
 // --- 結果表示 ------------------------------------------------------------------
 
-function renderResult(parsed) {
+function renderResult(parsed, thumbnail) {
   els.resultPanel.classList.remove("stale");
   els.resultStatus.textContent = "判定結果";
   els.resultDetails.innerHTML = "";
+
+  if (thumbnail) {
+    els.resultThumbnail.src = thumbnail;
+    els.resultThumbnail.hidden = false;
+  }
 
   const matchedTemplate = parsed.templateMatch
     ? state.templates.find((t) => t.id === parsed.templateMatch)
@@ -780,7 +788,7 @@ function drawArrow(ctx, from, to) {
   ctx.fill();
 }
 
-// --- ログ(APIレスポンスの数値のみ。画像は保存しない) ------------------------------
+// --- ログ(端末のlocalStorageにのみ保存。サムネイル画像もこの端末内だけに残る) ------
 
 function loadLog() {
   try {
@@ -791,19 +799,27 @@ function loadLog() {
   }
 }
 
+// サムネイル画像を含めるとlocalStorageの容量上限(端末により数MB程度)に達しやすいため、
+// 保存に失敗した場合は古いレコードから間引いて再試行する(それでも失敗したらあきらめる)。
 function saveLog(log) {
-  try {
-    localStorage.setItem(LOG_KEY, JSON.stringify(log));
-  } catch (e) {
-    // 保存できない場合は無視する
+  let toSave = log;
+  for (let attempt = 0; attempt < 6; attempt++) {
+    try {
+      localStorage.setItem(LOG_KEY, JSON.stringify(toSave));
+      return;
+    } catch (e) {
+      if (toSave.length <= 1) return;
+      toSave = toSave.slice(Math.ceil(toSave.length * 0.2));
+    }
   }
 }
 
-function appendLog(parsed) {
+function appendLog(parsed, thumbnail) {
   const log = loadLog();
   const template = currentTemplate();
   log.push({
     time: new Date().toISOString(),
+    thumbnail: thumbnail || null,
     scene: parsed.scene,
     sceneProb: parsed.sceneProb,
     subjectPos: parsed.subjectPos,
