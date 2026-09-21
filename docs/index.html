@@ -29,6 +29,14 @@
     センサーの利用を許可(iOSのみ)
   </button>
 
+  <section id="controls" aria-label="送信操作">
+    <label id="autoSendLabel">
+      <input type="checkbox" id="autoSendToggle" checked />
+      自動送信(静止を検出したら判定)
+    </label>
+    <button id="judgeNowBtn" type="button">今すぐ判定</button>
+  </section>
+
   <section id="metrics" aria-label="端末内で計算する画質指標">
     <div class="metric-row">
       <span class="metric-label">ブレ</span>
@@ -62,14 +70,6 @@
       <button id="thumbsUp" type="button" aria-label="役に立った">👍</button>
       <button id="thumbsDown" type="button" aria-label="役に立たなかった">👎</button>
     </div>
-  </section>
-
-  <section id="controls" aria-label="送信操作">
-    <label id="autoSendLabel">
-      <input type="checkbox" id="autoSendToggle" checked />
-      自動送信(静止を検出したら判定)
-    </label>
-    <button id="judgeNowBtn" type="button">今すぐ判定</button>
   </section>
 
   <section id="logSection" aria-label="ログ">
