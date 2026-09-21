@@ -2,7 +2,11 @@
 //
 // - parseAnswers(raw): APIの生レスポンスを画面表示・ガイド計算用の形に整形する
 // - cellToRC(cell): 9マス名を {row, col} (0-2) に変換する
-// - selectTemplate(templates, scene, pos): シーン・現在位置から最適なテンプレートを選ぶ
+// - buildTemplateMatchQuestion(templates): テンプレート一覧からサーバーに送る「どのテンプレートに
+//   一番近いか」を選ばせるchoice型の質問を組み立てる
+// - selectTemplate(templates, scene, pos): シーン・現在位置から最適なテンプレートを選ぶ(自動選択)
+// - resolveTemplate(templates, opts): 手動選択・サーバー判定(template_match)・自動選択の
+//   優先順位でテンプレートを1つに決める
 // - buildInstruction(template, pos, size): テンプレートと現在の位置・大きさから指示文を作る
 
 export const CELL_ORDER = [
@@ -51,13 +55,20 @@ function readNoul(answer) {
   return answer.noul;
 }
 
-// raw: { model, answers: {scene, subject_pos, subject_size, hae_score, sns_worthy}, usage }
+// raw: { model, answers: {scene, subject_pos, subject_size, hae_score, sns_worthy,
+//        skill_level, lighting_quality, color_harmony, background_clutter, template_match}, usage }
+// template_match は questions.jsonに含まれる固定項目ではなく、送信のたびに
+// buildTemplateMatchQuestion() で組み立ててリクエストに含める(仕様: 未確認の追加項目)。
+// skill_level/lighting_quality/color_harmony/background_clutter は、映え度以外の判定を
+// 精度検証のために追加した項目で、hae_photoでは確認されていない(仕様: 未確認の追加項目)。
 export function parseAnswers(raw) {
   const answers = (raw && raw.answers) || {};
   const usage = (raw && raw.usage) || {};
 
   const scene = readChoice(answers.scene);
   const subjectPos = readChoice(answers.subject_pos);
+  const templateMatch = readChoice(answers.template_match);
+  const skillLevel = readChoice(answers.skill_level);
 
   return {
     scene: scene.choice,
@@ -67,11 +78,33 @@ export function parseAnswers(raw) {
     subjectSize: readScore(answers.subject_size),
     haeScore: readScore(answers.hae_score),
     snsWorthy: readNoul(answers.sns_worthy),
+    templateMatch: templateMatch.choice,
+    templateMatchProb: templateMatch.prob,
+    skillLevel: skillLevel.choice,
+    skillLevelProb: skillLevel.prob,
+    lightingQuality: readScore(answers.lighting_quality),
+    colorHarmony: readScore(answers.color_harmony),
+    backgroundClutter: readScore(answers.background_clutter),
     usage: {
       inputTokens: typeof usage.input_tokens === "number" ? usage.input_tokens : null,
       outputTokens: typeof usage.output_tokens === "number" ? usage.output_tokens : null,
     },
     model: (raw && raw.model) || null,
+  };
+}
+
+// テンプレート一覧(docs/templates.json)から、APIに送る「どのテンプレートに一番近いか」を
+// 選ばせるchoice型の質問を組み立てる。テンプレートは運用中に増減し得るため、
+// questions.jsonに固定せずリクエストのたびにここで生成する。
+export function buildTemplateMatchQuestion(templates) {
+  const criteria = {};
+  for (const t of templates || []) {
+    if (t && t.id) criteria[t.id] = t.name || t.id;
+  }
+  return {
+    type: "choice",
+    instructions: "この写真の構図に最も近いテンプレートはどれか",
+    criteria,
   };
 }
 
@@ -107,6 +140,23 @@ export function selectTemplate(templates, scene, pos) {
     }
   }
   return best;
+}
+
+// テンプレートを1つに決める。優先順位は
+// 1. 手動選択(manualId、チップでの選択)
+// 2. サーバー判定(templateMatchId、APIのtemplate_matchの回答)
+// 3. 自動選択(scene・posからのselectTemplateによる推定)
+// manualId/templateMatchIdが指すテンプレートが見つからない場合は次の優先度にフォールバックする。
+export function resolveTemplate(templates, { manualId = null, templateMatchId = null, scene = null, pos = null } = {}) {
+  if (manualId) {
+    const found = (templates || []).find((t) => t.id === manualId);
+    if (found) return found;
+  }
+  if (templateMatchId) {
+    const found = (templates || []).find((t) => t.id === templateMatchId);
+    if (found) return found;
+  }
+  return selectTemplate(templates, scene, pos);
 }
 
 // template・現在の被写体位置(pos)・大きさの期待値(size)から指示文を作る。

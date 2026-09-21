@@ -5,8 +5,9 @@
 import {
   parseAnswers,
   cellToRC,
-  selectTemplate,
+  resolveTemplate,
   buildInstruction,
+  buildTemplateMatchQuestion,
 } from "./guide.js";
 import {
   toGrayscale,
@@ -435,14 +436,23 @@ async function fetchWithTimeout(url, options, timeoutMs) {
   }
 }
 
-// api.codiv.ai へのリクエスト。タイムアウト/ネットワークエラー時のみ、短い待機を挿んで
-// 最大1回まで再送する(認証エラー等のHTTPエラー応答は再送しない)。
+// questions.jsonの固定項目に、テンプレート一覧から都度組み立てるtemplate_matchを足したものを
+// リクエストのquestionsとして使う(テンプレートは運用中に増減し得るため)。
+function buildRequestQuestions() {
+  return {
+    ...state.questions,
+    template_match: buildTemplateMatchQuestion(state.templates),
+  };
+}
+
+// api.codiv.ai へのリクエスト。タイムアウト/ネットワークエラー時のみ、
+// 短い待機を挟んで最大1回まで再送する(認証エラー等のHTTPエラー応答は再送しない)。
 async function realRequest(dataUrl) {
   const body = JSON.stringify({
     model: state.settings.model,
     state: "Look at the photo.",
     images: [dataUrl],
-    questions: state.questions,
+    questions: buildRequestQuestions(),
   });
   const headers = {
     "Content-Type": "application/json",
@@ -505,15 +515,30 @@ async function mockRequest() {
     return { type: "choice", choice: picked, probabilities, confidence: probabilities[picked] };
   }
 
+  const skillLevels = Object.keys(state.questions.skill_level.criteria);
+  const skillLevel = randChoice(state.questions.skill_level.criteria);
+
+  const answers = {
+    scene: fakeChoiceAnswer(scenes, scene),
+    subject_pos: fakeChoiceAnswer(positions, pos),
+    subject_size: { type: "score", score: Math.random() * 4, confidence: 0.5 },
+    hae_score: { type: "score", score: Math.random() * 4, confidence: 0.5 },
+    sns_worthy: { type: "noul", noul: Math.random() },
+    skill_level: fakeChoiceAnswer(skillLevels, skillLevel),
+    lighting_quality: { type: "score", score: Math.random() * 4, confidence: 0.5 },
+    color_harmony: { type: "score", score: Math.random() * 4, confidence: 0.5 },
+    background_clutter: { type: "score", score: Math.random() * 4, confidence: 0.5 },
+  };
+
+  const templateCriteria = buildTemplateMatchQuestion(state.templates).criteria;
+  const templateIds = Object.keys(templateCriteria);
+  if (templateIds.length > 0) {
+    answers.template_match = fakeChoiceAnswer(templateIds, randChoice(templateCriteria));
+  }
+
   return {
     model: "mock",
-    answers: {
-      scene: fakeChoiceAnswer(scenes, scene),
-      subject_pos: fakeChoiceAnswer(positions, pos),
-      subject_size: { type: "score", score: Math.random() * 4, confidence: 0.5 },
-      hae_score: { type: "score", score: Math.random() * 4, confidence: 0.5 },
-      sns_worthy: { type: "noul", noul: Math.random() },
-    },
+    answers,
     usage: { input_tokens: 0, output_tokens: 0 },
   };
 }
@@ -525,12 +550,21 @@ function renderResult(parsed) {
   els.resultStatus.textContent = "判定結果";
   els.resultDetails.innerHTML = "";
 
+  const matchedTemplate = parsed.templateMatch
+    ? state.templates.find((t) => t.id === parsed.templateMatch)
+    : null;
+
   const rows = [
     ["シーン", parsed.scene ? state.questions.scene.criteria[parsed.scene] : "不明"],
     ["被写体の位置", parsed.subjectPos ? state.questions.subject_pos.criteria[parsed.subjectPos] : "不明"],
+    ["サーバー判定の構図", matchedTemplate ? matchedTemplate.name : "不明"],
     ["被写体の大きさ", parsed.subjectSize !== null ? parsed.subjectSize.toFixed(2) : "--"],
     ["映え度", parsed.haeScore !== null ? parsed.haeScore.toFixed(2) : "--"],
     ["SNS映え確率", parsed.snsWorthy !== null ? (parsed.snsWorthy * 100).toFixed(1) + "%" : "--"],
+    ["スキル感", parsed.skillLevel ? state.questions.skill_level.criteria[parsed.skillLevel] : "不明"],
+    ["光の使い方", parsed.lightingQuality !== null ? parsed.lightingQuality.toFixed(2) : "--"],
+    ["配色の統一感", parsed.colorHarmony !== null ? parsed.colorHarmony.toFixed(2) : "--"],
+    ["背景のすっきり度", parsed.backgroundClutter !== null ? parsed.backgroundClutter.toFixed(2) : "--"],
   ];
   for (const [k, v] of rows) {
     const dt = document.createElement("dt");
@@ -553,12 +587,15 @@ function renderResult(parsed) {
 
 // --- 画角ガイド ------------------------------------------------------------------
 
+// テンプレートの決定優先順位: 手動選択 > サーバー判定(template_match) > 自動選択。
 function currentTemplate() {
   if (!state.lastResult) return null;
-  if (state.manualTemplateId) {
-    return state.templates.find((t) => t.id === state.manualTemplateId) || null;
-  }
-  return selectTemplate(state.templates, state.lastResult.scene, state.lastResult.subjectPos);
+  return resolveTemplate(state.templates, {
+    manualId: state.manualTemplateId,
+    templateMatchId: state.lastResult.templateMatch,
+    scene: state.lastResult.scene,
+    pos: state.lastResult.subjectPos,
+  });
 }
 
 function refreshGuidance() {
@@ -688,6 +725,13 @@ function appendLog(parsed) {
     subjectSize: parsed.subjectSize,
     haeScore: parsed.haeScore,
     snsWorthy: parsed.snsWorthy,
+    templateMatch: parsed.templateMatch,
+    templateMatchProb: parsed.templateMatchProb,
+    skillLevel: parsed.skillLevel,
+    skillLevelProb: parsed.skillLevelProb,
+    lightingQuality: parsed.lightingQuality,
+    colorHarmony: parsed.colorHarmony,
+    backgroundClutter: parsed.backgroundClutter,
     templateId: template ? template.id : null,
     deviceMetrics: {
       blur: state.emaBlur.get(),
