@@ -77,7 +77,7 @@ export function rollFromAcceleration(ax, ay) {
   return (Math.atan2(ax, ay) * 180) / Math.PI;
 }
 
-// roll(度)から、最も近い90°の倍数からの偏差 t(度)を求める。
+// roll(度)から、最も近い90°の倍数からの偏差t(度)を求める。
 export function deviationFromLevel(rollDeg) {
   const nearest90 = Math.round(rollDeg / 90) * 90;
   return rollDeg - nearest90;
@@ -116,6 +116,21 @@ export function createStillnessTracker(threshold = 3, requiredFrames = 6) {
       return streak;
     },
   };
+}
+
+// ピンチ操作の指2点間の距離(px)を求める。touches は {clientX, clientY} を持つ要素2つ以上の配列。
+export function touchDistance(touches) {
+  if (!touches || touches.length < 2) return null;
+  const dx = touches[0].clientX - touches[1].clientX;
+  const dy = touches[0].clientY - touches[1].clientY;
+  return Math.hypot(dx, dy);
+}
+
+// ピンチ開始時からの指の距離比に応じてズーム値を計算し、min〜maxにclampする。
+export function zoomFromPinch(startDistance, currentDistance, startZoom, min, max) {
+  if (!startDistance || startDistance <= 0 || typeof startZoom !== "number") return startZoom;
+  const ratio = currentDistance / startDistance;
+  return Math.min(max, Math.max(min, startZoom * ratio));
 }
 
 // 指数移動平均(EMA)。alpha=0.35を既定とする。

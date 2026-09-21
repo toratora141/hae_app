@@ -20,6 +20,8 @@ import {
   frameDiff,
   createStillnessTracker,
   createEma,
+  touchDistance,
+  zoomFromPinch,
 } from "./analyze.js";
 
 const DEFAULTS = {
@@ -83,6 +85,12 @@ const state = {
   lastResult: null, // parseAnswers()の結果
   manualTemplateId: null, // nullなら自動選択
   isMoving: false,
+  videoTrack: null,
+  zoomMin: undefined, // undefinedならズーム非対応
+  zoomMax: undefined,
+  zoomValue: 1,
+  pinchStartDistance: null,
+  pinchStartZoom: null,
 };
 
 const els = {};
@@ -93,7 +101,8 @@ function $(id) {
 
 function cacheEls() {
   [
-    "video", "overlay", "cameraPlaceholder", "startCameraBtn", "motionPermissionBtn",
+    "cameraArea", "video", "overlay", "cameraPlaceholder", "startCameraBtn", "motionPermissionBtn",
+    "zoomSection", "zoomSlider", "zoomValue",
     "blurMeter", "blurValue", "brightnessMeter", "brightnessValue", "levelMeter", "levelValue",
     "stillnessBadge", "templateChips", "instructionText", "resultPanel", "resultStatus",
     "resultDetails", "resultMeta", "feedbackButtons", "thumbsUp", "thumbsDown",
@@ -206,11 +215,88 @@ async function startCamera() {
     els.video.srcObject = state.stream;
     await els.video.play();
     els.cameraPlaceholder.classList.add("hidden");
+    setupCameraTrackControls();
     startAnalyzeLoop();
   } catch (e) {
     els.resultStatus.textContent =
       "カメラを開始できませんでした: " + (e && e.message ? e.message : e);
   }
+}
+
+// --- ズーム・オートフォーカス --------------------------------------------------
+// 対応はブラウザ・端末依存(主にAndroid Chrome系)。非対応の場合は何もしない。
+
+function setupCameraTrackControls() {
+  const track = state.stream.getVideoTracks()[0];
+  state.videoTrack = track || null;
+  els.zoomSection.hidden = true;
+  if (!track || typeof track.getCapabilities !== "function") return;
+
+  let capabilities;
+  try {
+    capabilities = track.getCapabilities();
+  } catch (e) {
+    return;
+  }
+
+  // オートフォーカス: 対応していれば連続オートフォーカスを明示的に有効化する。
+  if (Array.isArray(capabilities.focusMode) && capabilities.focusMode.includes("continuous")) {
+    track.applyConstraints({ advanced: [{ focusMode: "continuous" }] }).catch(() => {});
+  }
+
+  // ズーム: 対応していればスライダーとピンチ操作を有効化する。
+  if (capabilities.zoom && typeof capabilities.zoom.min === "number") {
+    state.zoomMin = capabilities.zoom.min;
+    state.zoomMax = capabilities.zoom.max;
+    const settings = typeof track.getSettings === "function" ? track.getSettings() : {};
+    state.zoomValue = typeof settings.zoom === "number" ? settings.zoom : state.zoomMin;
+
+    els.zoomSlider.min = state.zoomMin;
+    els.zoomSlider.max = state.zoomMax;
+    els.zoomSlider.step = capabilities.zoom.step || 0.1;
+    els.zoomSlider.value = state.zoomValue;
+    els.zoomValue.textContent = `${state.zoomValue.toFixed(1)}x`;
+    els.zoomSection.hidden = false;
+  } else {
+    state.zoomMin = undefined;
+    state.zoomMax = undefined;
+  }
+}
+
+function applyZoom(value) {
+  if (!state.videoTrack || state.zoomMin === undefined) return;
+  const clamped = Math.min(state.zoomMax, Math.max(state.zoomMin, value));
+  state.zoomValue = clamped;
+  state.videoTrack.applyConstraints({ advanced: [{ zoom: clamped }] }).catch(() => {});
+  els.zoomSlider.value = clamped;
+  els.zoomValue.textContent = `${clamped.toFixed(1)}x`;
+}
+
+// カメラ映像上のピンチ操作でズームを操作する(ズーム対応時のみ動作する)。
+function setupPinchZoom() {
+  els.cameraArea.addEventListener("touchstart", (ev) => {
+    if (ev.touches.length === 2 && state.zoomMin !== undefined) {
+      state.pinchStartDistance = touchDistance(ev.touches);
+      state.pinchStartZoom = state.zoomValue;
+    }
+  });
+
+  els.cameraArea.addEventListener(
+    "touchmove",
+    (ev) => {
+      if (ev.touches.length === 2 && state.pinchStartDistance && state.zoomMin !== undefined) {
+        ev.preventDefault();
+        const dist = touchDistance(ev.touches);
+        const next = zoomFromPinch(state.pinchStartDistance, dist, state.pinchStartZoom, state.zoomMin, state.zoomMax);
+        applyZoom(next);
+      }
+    },
+    { passive: false }
+  );
+
+  els.cameraArea.addEventListener("touchend", () => {
+    state.pinchStartDistance = null;
+  });
 }
 
 // --- devicemotion(水平指標) ---------------------------------------------------
@@ -836,6 +922,8 @@ function wireEvents() {
   );
   els.judgeNowBtn.addEventListener("click", () => maybeSendJudgement("manual"));
 
+  els.zoomSlider.addEventListener("input", () => applyZoom(Number(els.zoomSlider.value)));
+
   els.thumbsUp.addEventListener("click", () => setFeedback("up"));
   els.thumbsDown.addEventListener("click", () => setFeedback("down"));
 
@@ -855,6 +943,7 @@ async function init() {
   applySettingsToForm();
   wireEvents();
   setupMotionPermission();
+  setupPinchZoom();
   updateLogCount();
 
   await loadStaticData();
