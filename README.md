@@ -129,6 +129,31 @@ POST https://api.codiv.ai/v1/systemone
 `docs/guide.js` の `selectTemplate` は、シーンが一致するテンプレートのうち現在の9マス位置から
 `target.cell` までの距離(マンハッタン距離)が最小のものを選び、同点なら `priority` が大きい方を選びます。
 
+### テンプレートの決定方法(手動選択 / サーバー判定 / 自動選択)
+
+画面に表示するテンプレートは、次の優先順位で1つに決まります(`docs/guide.js` の `resolveTemplate`)。
+
+1. **手動選択**: チップで選んだテンプレート
+2. **サーバー判定**: APIに新設した `template_match` という質問(「この写真の構図に最も近いテンプレートは
+   どれか」を `docs/templates.json` のテンプレート一覧から選ばせるchoice型)への回答。確率が0.4未満なら
+   scene/subject_posと同様に不明として扱い、次の優先度にフォールバックする
+3. **自動選択**: 上記が無ければ、これまで通り `selectTemplate`(シーン+9マス位置からの距離計算)
+
+`template_match` の質問は `docs/questions.json` には含めず、`docs/app.js` の `buildRequestQuestions()` が
+`docs/templates.json` の内容からリクエストのたびに組み立てます(テンプレートを追加・変更しても
+質問側を手で同期させる必要がないようにするため)。
+
+一方、「目標とのズレの方向・量」自体(左右上下・近づく/離れるの指示文)は、これまで通り
+`subject_pos`(9マス位置)と `subject_size`(大きさの期待値)からクライアント側で機械的に計算しています
+(`buildInstruction`)。モデルに直接ズレの量を答えさせる案も検討しましたが、`choice`/`score`/`noul` という
+確認済みのレスポンス形式には「方向・量」を表すフィールドが無く、モデルがそれを正確に返せる保証もないため、
+確実に計算できるこの方式のままにしています。
+
+**注意**: `template_match` はhae_photoで実際に確認された質問ではなく、今回新しく追加したものです。
+`scene`/`subject_pos`/`hae_score`/`sns_worthy` とは異なり、実際のAPIがこの質問に対して同じ
+`choice` 形式(`{ type, choice, probabilities, confidence }`)で答えてくれるかどうかは未確認です。
+実機で「今すぐ判定」を試し、判定結果の「サーバー判定の構図」欄が空欄(不明)ばかりにならないか確認してください。
+
 ## テスト
 
 ```
@@ -138,7 +163,8 @@ npm test
 (内部的には `node --test` を実行します。)
 
 `tests/guide.test.js` で `parseAnswers`(実フィクスチャ使用)・`cellToRC`・`selectTemplate`・
-`buildInstruction`(左右上下・サイズ・不明・達成の各ケース)を検証しています。19件すべてパスすることを
+`buildTemplateMatchQuestion`・`resolveTemplate`(手動選択/サーバー判定/自動選択の優先順位)・
+`buildInstruction`(左右上下・サイズ・不明・達成の各ケース)を検証しています。27件すべてパスすることを
 確認済みです。
 
 `docs/analyze.js`(ブレ・明るさ・水平・静止判定)と `docs/app.js`(カメラ・UI結線・API通信)は、
@@ -180,3 +206,5 @@ Node環境では動かせない(カメラ・センサー・DOM・ネットワー
 - 長時間の自動送信運用でのAPIレート制限・コストの実際の挙動
 - 追加したリトライ・タイムアウトの方針が、実際のapi.codiv.aiの挙動(レート制限やタイムアウト特性)に
   対して適切かどうか
+- 新設した `template_match` 質問(テンプレート一覧からの構図マッチング)に対して、APIが
+  `scene`/`subject_pos` と同じ `choice` 形式で答えてくれるかどうか(hae_photoでは未確認の項目のため)
