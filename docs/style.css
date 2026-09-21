@@ -136,6 +136,21 @@ button:active {
   display: none;
 }
 
+#zoomSection {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+}
+
+#zoomSection[hidden] {
+  display: none;
+}
+
+input[type="range"] {
+  width: 100%;
+}
+
 #metrics {
   display: flex;
   flex-direction: column;
