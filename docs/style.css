@@ -255,6 +255,18 @@ meter {
   font-weight: bold;
 }
 
+#resultThumbnail {
+  display: block;
+  width: 100%;
+  max-width: 220px;
+  border-radius: 8px;
+  margin: 0 0 8px;
+}
+
+#resultThumbnail[hidden] {
+  display: none;
+}
+
 #resultDetails {
   display: grid;
   grid-template-columns: auto 1fr;
