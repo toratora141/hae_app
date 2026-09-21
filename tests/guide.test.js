@@ -8,6 +8,8 @@ import {
   parseAnswers,
   cellToRC,
   selectTemplate,
+  resolveTemplate,
+  buildTemplateMatchQuestion,
   buildInstruction,
   CONFIDENCE_THRESHOLD,
 } from "../docs/guide.js";
@@ -21,7 +23,7 @@ function loadFixture(name) {
   return JSON.parse(readFileSync(path.join(__dirname, "fixtures", name), "utf-8"));
 }
 
-// --- parseAnswers(実際に確認したレスポンスの構造を使用) ------------------------------
+// --- parseAnswers(実際に確認したレスポンスの構造を使用) ------------------------
 
 test("parseAnswers: 人物・中央の実レスポンスを解釈できる", () => {
   const parsed = parseAnswers(loadFixture("response_person_center.json"));
@@ -70,7 +72,47 @@ test("parseAnswers: answersが空でも例外にならない", () => {
   const parsed = parseAnswers({});
   assert.equal(parsed.scene, null);
   assert.equal(parsed.subjectSize, null);
+  assert.equal(parsed.templateMatch, null);
   assert.equal(parsed.usage.inputTokens, null);
+});
+
+test("parseAnswers: template_matchもscene/subject_posと同じ形式(choice型)で解釈できる", () => {
+  const raw = {
+    answers: {
+      template_match: {
+        type: "choice",
+        choice: "thirds_left",
+        probabilities: {
+          thirds_left: 0.6,
+          thirds_right: 0.1,
+          center_symmetry: 0.15,
+          topdown_food: 0.1,
+          person_thirds: 0.05,
+        },
+        confidence: 0.5,
+      },
+    },
+    usage: {},
+  };
+  const parsed = parseAnswers(raw);
+  assert.equal(parsed.templateMatch, "thirds_left");
+  assert.ok(parsed.templateMatchProb >= CONFIDENCE_THRESHOLD);
+});
+
+test("parseAnswers: template_matchの確率がしきい値未満なら不明(null)として扱う", () => {
+  const raw = {
+    answers: {
+      template_match: {
+        type: "choice",
+        choice: "thirds_left",
+        probabilities: { thirds_left: 0.3, thirds_right: 0.3, center_symmetry: 0.4 },
+        confidence: 0.3,
+      },
+    },
+    usage: {},
+  };
+  const parsed = parseAnswers(raw);
+  assert.equal(parsed.templateMatch, null);
 });
 
 // --- cellToRC ------------------------------------------------------------
@@ -110,6 +152,62 @@ test("selectTemplate: sceneがnullならnullを返す", () => {
 
 test("selectTemplate: 一致するsceneが無ければnullを返す", () => {
   assert.equal(selectTemplate(templates, "no_such_scene", "center"), null);
+});
+
+// --- buildTemplateMatchQuestion ----------------------------------------------
+
+test("buildTemplateMatchQuestion: テンプレート一覧からchoice型の質問を組み立てる", () => {
+  const q = buildTemplateMatchQuestion(templates);
+  assert.equal(q.type, "choice");
+  assert.equal(q.criteria.thirds_left, "三分割・左寄せ");
+  assert.equal(Object.keys(q.criteria).length, templates.length);
+});
+
+test("buildTemplateMatchQuestion: テンプレートが空でも例外にならない", () => {
+  const q = buildTemplateMatchQuestion([]);
+  assert.deepEqual(q.criteria, {});
+});
+
+// --- resolveTemplate -----------------------------------------------------------
+
+test("resolveTemplate: 手動選択が最優先される", () => {
+  const t = resolveTemplate(templates, {
+    manualId: "center_symmetry",
+    templateMatchId: "thirds_left",
+    scene: "food",
+    pos: "center",
+  });
+  assert.equal(t.id, "center_symmetry");
+});
+
+test("resolveTemplate: 手動選択が無ければサーバー判定(template_match)を使う", () => {
+  const t = resolveTemplate(templates, {
+    manualId: null,
+    templateMatchId: "person_thirds",
+    scene: "food",
+    pos: "top_left",
+  });
+  assert.equal(t.id, "person_thirds");
+});
+
+test("resolveTemplate: 手動選択・サーバー判定とも無ければ自動選択(selectTemplate)にフォールバックする", () => {
+  const t = resolveTemplate(templates, {
+    manualId: null,
+    templateMatchId: null,
+    scene: "food",
+    pos: "top_left",
+  });
+  assert.equal(t.id, "thirds_left");
+});
+
+test("resolveTemplate: templateMatchIdが存在しないIDなら自動選択にフォールバックする", () => {
+  const t = resolveTemplate(templates, {
+    manualId: null,
+    templateMatchId: "no_such_template",
+    scene: "food",
+    pos: "center",
+  });
+  assert.equal(t.id, "topdown_food");
 });
 
 // --- buildInstruction --------------------------------------------------------
