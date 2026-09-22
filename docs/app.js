@@ -127,7 +127,7 @@ const state = {
   zoomValue: 1,
   pinchStartDistance: null,
   pinchStartZoom: null,
-  // --- 質問セット/表示モード -------------------------------------------
+  // --- 質問セット/表示モード -------------------------------------------------
   effectiveQuestionSet: "A", // 4xxフォールバック後はsettings.questionSetと異なる場合がある
   fallbackNotified: false,
   // --- 位置の連続化(ヒステリシス) ---------------------------------------------
@@ -429,7 +429,7 @@ function setupMotionPermission() {
   });
 }
 
-// --- 端末内指標の計算ループ(甄8fps) -------------------------------------------
+// --- 端末内指標の計算ループ(約8fps) -------------------------------------------
 
 let analyzeCanvas, analyzeCtx, smallCanvas, smallCtx, captureCanvas, captureCtx, shutterCanvas, shutterCtx;
 
@@ -746,7 +746,7 @@ function buildRequestQuestions() {
 }
 
 // api.codiv.ai へのリクエスト。タイムアウト/ネットワークエラー時のみ、
-// 短い待機を挿んで最大1回まで再送する(認証エラー等のHTTPエラー応答は再送しない)。
+// 短い待機を挟んで最大1回まで再送する(認証エラー等のHTTPエラー応答は再送しない)。
 async function realRequest(dataUrl) {
   const body = JSON.stringify({
     model: state.settings.model,
@@ -809,7 +809,7 @@ function fakeChoiceAnswer(keys, picked) {
   return { type: "choice", choice: picked, probabilities, confidence: probabilities[picked] };
 }
 
-// 質問定義(type: choice/score/noul)から、その型に応じた模似応答を1つ作る。
+// 質問定義(type: choice/score/noul)から、その型に応じた疑似応答を1つ作る。
 function fakeAnswerForDef(def) {
   if (!def) return null;
   if (def.type === "choice") {
@@ -828,7 +828,7 @@ function fakeAnswerForDef(def) {
 
 async function mockRequest() {
   // ネットワークを呼ばず、現在の質問セットに含まれるキーそれぞれについて、
-  // questions/defs.jsonの定義(type)に応じたランダムな模似応答を作る。
+  // questions/defs.jsonの定義(type)に応じたランダムな疑似応答を作る。
   await sleep(200 + Math.random() * 400);
 
   const answers = {};
@@ -868,6 +868,14 @@ function renderResult(parsed, thumbnail) {
     ? state.templates.find((t) => t.id === parsed.templateMatch)
     : null;
 
+  // scene/subject_pos/subject_sizeは全セット共通で必ず問い合わせるが、それ以外の項目は
+  // 質問セット(A/B/C)によって問い合わせていない場合がある。問い合わせていない項目まで
+  // 「不明」と表示すると、その質問自体が不採用だったのか判定が不明瞭だったのか区別が付かず
+  // 誤解を招くため、行ごと表示しない(仕様修正: 質問セットAで「直すべき点」が常に不明に
+  // 見えていた不具合への対応)。
+  const activeKeys = activeQuestionSetKeys();
+  const has = (key) => activeKeys.includes(key);
+
   const rows = [
     ["シーン", parsed.scene ? state.questionDefs.scene.criteria[parsed.scene] : "不明"],
     [
@@ -875,21 +883,37 @@ function renderResult(parsed, thumbnail) {
       parsed.subjectPos ? state.questionDefs.subject_pos.criteria[parsed.subjectPos] : "不明",
     ],
     ["現在マス(平滑化後)", state.currentCell ? state.questionDefs.subject_pos.criteria[state.currentCell] : "不明"],
-    ["サーバー判定の構図", matchedTemplate ? matchedTemplate.name : "不明"],
     ["被写体の大きさ", parsed.subjectSize !== null ? parsed.subjectSize.toFixed(2) : "--"],
-    ["映え度", parsed.haeScore !== null ? parsed.haeScore.toFixed(2) : "--"],
-    ["SNS映え確率", parsed.snsWorthy !== null ? (parsed.snsWorthy * 100).toFixed(1) + "%" : "--"],
-    ["スキル感", parsed.skillLevel ? state.questionDefs.skill_level.criteria[parsed.skillLevel] : "不明"],
-    ["光の使い方", parsed.lightingQuality !== null ? parsed.lightingQuality.toFixed(2) : "--"],
-    ["配色の統一感", parsed.colorHarmony !== null ? parsed.colorHarmony.toFixed(2) : "--"],
-    ["背景のすっきり度", parsed.backgroundClutter !== null ? parsed.backgroundClutter.toFixed(2) : "--"],
-    [
+  ];
+  if (state.settings.templateMatchEnabled) {
+    rows.push(["サーバー判定の構図", matchedTemplate ? matchedTemplate.name : "不明"]);
+  }
+  if (has("hae_score")) {
+    rows.push(["映え度", parsed.haeScore !== null ? parsed.haeScore.toFixed(2) : "--"]);
+  }
+  if (has("sns_worthy")) {
+    rows.push(["SNS映え確率", parsed.snsWorthy !== null ? (parsed.snsWorthy * 100).toFixed(1) + "%" : "--"]);
+  }
+  if (has("skill_level")) {
+    rows.push(["スキル感", parsed.skillLevel ? state.questionDefs.skill_level.criteria[parsed.skillLevel] : "不明"]);
+  }
+  if (has("lighting_quality")) {
+    rows.push(["光の使い方", parsed.lightingQuality !== null ? parsed.lightingQuality.toFixed(2) : "--"]);
+  }
+  if (has("color_harmony")) {
+    rows.push(["配色の統一感", parsed.colorHarmony !== null ? parsed.colorHarmony.toFixed(2) : "--"]);
+  }
+  if (has("background_clutter")) {
+    rows.push(["背景のすっきり度", parsed.backgroundClutter !== null ? parsed.backgroundClutter.toFixed(2) : "--"]);
+  }
+  if (has("main_problem")) {
+    rows.push([
       "直すべき点",
       parsed.mainProblem && state.questionDefs.main_problem
         ? state.questionDefs.main_problem.criteria[parsed.mainProblem]
         : "不明",
-    ],
-  ];
+    ]);
+  }
   for (const [k, v] of rows) {
     const dt = document.createElement("dt");
     dt.textContent = k;
