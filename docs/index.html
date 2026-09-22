@@ -28,6 +28,27 @@
     </div>
   </div>
 
+  <section id="guidancePanel" aria-label="画角ガイド">
+    <div id="templateChips" role="group" aria-label="テンプレート選択"></div>
+    <p id="instructionText">被写体を認識するとガイドが表示されます</p>
+    <div id="instructionFeedback" hidden>
+      <button id="instructionUnderstoodBtn" type="button">伝わった</button>
+      <button id="instructionUnclearBtn" type="button">分かりにくい</button>
+    </div>
+  </section>
+
+  <section id="resultPanel" aria-label="判定結果">
+    <p id="resultStatus">まだ判定していません</p>
+    <img id="resultThumbnail" alt="この判定に使われた写真" hidden />
+    <dl id="resultDetails"></dl>
+    <p id="resultMeta"></p>
+    <div id="feedbackButtons" hidden>
+      <span>この判定は役に立ちましたか?</span>
+      <button id="thumbsUp" type="button" aria-label="役に立った">👍</button>
+      <button id="thumbsDown" type="button" aria-label="役に立たなかった">👎</button>
+    </div>
+  </section>
+
   <section id="zoomSection" aria-label="ズーム" hidden>
     <div class="metric-row">
       <span class="metric-label">ズーム</span>
@@ -73,27 +94,6 @@
       <span id="levelValue" class="metric-value">--</span>
     </div>
     <div id="stillnessBadge" class="badge">静止待ち</div>
-  </section>
-
-  <section id="guidancePanel" aria-label="画角ガイド">
-    <div id="templateChips" role="group" aria-label="テンプレート選択"></div>
-    <p id="instructionText">被写体を認識するとガイドが表示されます</p>
-    <div id="instructionFeedback" hidden>
-      <button id="instructionUnderstoodBtn" type="button">伝わった</button>
-      <button id="instructionUnclearBtn" type="button">分かりにくい</button>
-    </div>
-  </section>
-
-  <section id="resultPanel" aria-label="判定結果">
-    <p id="resultStatus">まだ判定していません</p>
-    <img id="resultThumbnail" alt="この判定に使われた写真" hidden />
-    <dl id="resultDetails"></dl>
-    <p id="resultMeta"></p>
-    <div id="feedbackButtons" hidden>
-      <span>この判定は役に立ちましたか?</span>
-      <button id="thumbsUp" type="button" aria-label="役に立った">👍</button>
-      <button id="thumbsDown" type="button" aria-label="役に立たなかった">👎</button>
-    </div>
   </section>
 
   <section id="logSection" aria-label="ログ">
