@@ -1,0 +1,21 @@
+{
+  "camera_angle": {
+    "type": "choice",
+    "instructions": "現在の画角は、この被写体に対してどのアングルか",
+    "criteria": {
+      "high_angle": "見下ろしている（カメラが被写体より高い位置）",
+      "eye_level": "水平・被写体と同じ高さ",
+      "low_angle": "見上げている（カメラが被写体より低い位置）"
+    }
+  },
+  "recommended_angle": {
+    "type": "choice",
+    "instructions": "この被写体を最も魅力的に撮るなら、どのアングルが適切か",
+    "criteria": {
+      "high_angle": "見下ろし（俯瞰）が向く被写体",
+      "eye_level": "水平が向く被写体",
+      "low_angle": "見上げ（ローアングル）が向く被写体",
+      "current_is_fine": "今のアングルのままでよい"
+    }
+  }
+}
