@@ -524,3 +524,66 @@ Node環境では動かせない(カメラ・センサー・DOM・ネットワー
 - 実機のスマホ縦持ち画面での、single表示モードの大きな主指示テキストの実際の見やすさ・行数
 - 単一指示に絞ったことで、実際に「何を直せばよいか」が複数指示併記時より伝わりやすくなっているか
   (これ自体が今回の旅行テストで検証したい主目的であり、根拠となる実測データはまだ無い)
+
+## docs/angle/ (撮影アングル判定の実験ページ、独立)
+
+上記のメインページ(`docs/index.html` ほか、質問セットA/B/C・指示エンジン・ログv2・`guide.js`・
+`app.js`・`instructions.js`・`templates.json`)とは完全に分離した、別目的の実験用ページです。
+`camera_angle`(今のカメラの高さ・角度)と`recommended_angle`(本来どのアングルで撮るべきか)の
+2問のみをJevに判定させ、両者が一致しなければ日本語の指示文に変換して表示します。メインページの
+質問セット・指示エンジン・ログ・`guide.js`/`app.js`/`instructions.js`には一切触れておらず、
+`docs/angle/questions.json`に保存した2問のみを送信します(参照: `docs/angle/guide.js`の
+`MISMATCH_RULES`)。
+
+- **URL**: GitHub Pages公開後は `<既存のPages URL>/angle/` (例: `https://<ユーザー名>.github.io/hae_app/angle/`)
+- **使い方**:
+  1. 公開されたページをスマホのブラウザで開く
+  2. 右上の「設定」から、エンドポイント・モデル名・APIキーを入力して保存する
+     (メインページ`docs/index.html`の設定(`haeApp.settings.v1`)が既に保存済みなら、初期値として
+     読み込みます。保存はこのページ専用の`localStorage`キー`haeApp.angle.settings.v1`にのみ行われ、
+     メインページの設定は変更しません)
+     - メインページと同様、`api.codiv.ai`への直接`fetch()`はCORSで失敗するため(上記「CORSについて」
+       参照)、実運用ではCloudflare Workers中継のURLをエンドポイントに設定してください
+  3. 「カメラを開始」を押し、背面カメラでプレビューを表示する
+  4. 画面が静止すると自動で1枚だけAPIに送信され、現在のアングル・おすすめのアングル・指示文が表示される
+     (自動送信はオフにでき、その場合は「判定」ボタンで手動送信する)
+  5. 「ログをJSONで書き出す」でこれまでの記録(ファイル名・画像は含まない)を保存できる
+
+  動作確認だけしたい場合は、URLに`?mock=1`を付けて開くとAPIを呼ばずに疑似応答で一通り動作します。
+
+- **判定結果の表示ルール**:
+  - `camera_angle`と`recommended_angle`が一致する場合(`recommended_angle`が`current_is_fine`の場合を
+    含む)は「今のアングルのままでよい」と緑色で表示する
+  - 一致しない場合は、`docs/angle/guide.js`の`MISMATCH_RULES`に従って日本語の指示文に変換する
+  - `camera_angle`・`recommended_angle`いずれかの確率(選択された選択肢の`probabilities[choice]`)が
+    `0.4`未満の場合は「アングルの判定ができませんでした」と表示し、指示文は出さない
+  - レスポンスのキー欠如・型不一致(例: `choice`型でない、`probabilities`が無い)はクラッシュさせず、
+    すべて「不明」として扱う(`docs/angle/guide.js`の`parseAngleAnswers`/`buildAngleGuidance`参照)
+
+- **既存実装からの再利用範囲**: `docs/analyze.js`の`toGrayscale`/`frameDiff`/`createStillnessTracker`
+  (静止判定: グレースケール差分の平均絶対差が閾値未満のフレームが6回連続で静止とみなす)のみを
+  読み取り専用で`import`している。それ以外(カメラ起動・送信ロジック・UI・設定)は
+  `docs/angle/app.js`に独立して実装した。送信間隔・再送判定・静止判定・画像縮小(長辺768px・
+  JPEG品質0.8)・直列化・タイムアウト(15秒)・リトライ(ネットワークエラー/タイムアウト時のみ最大1回、
+  HTTPエラー応答は再送しない)は、いずれも既存の`docs/app.js`の同名定数・`realRequest`と同じ値・
+  方針でこのページ専用に実装した(既存ファイルは一切変更していない)。
+
+- **未確認事項**:
+  - `camera_angle`/`recommended_angle`の2問が実APIでどのような型・分布(確率のばらつき、`choice`の
+    偏り等)で返るかは未検証。画像を含まないテキストのみのリクエストでは、`HTTP 200`で以下の構造の
+    レスポンスが返ることを確認した(画像は一切送っておらずこのコミットにも含まれていない)が、
+    実際に(見下ろし/見上げ等の)写真を送った際の精度・分布は未検証。
+
+    ```
+    answers.camera_angle:      { type: "choice", choice, probabilities: {選択肢: 確率}, confidence }
+    answers.recommended_angle: { type: "choice", choice, probabilities: {選択肢: 確率(current_is_fineを含む)}, confidence }
+    usage: { input_tokens, output_tokens }
+    ```
+
+  - 実機のカメラ・傾きセンサー・iOSでの挙動(メインページの「未確認事項」と同様の制約)
+  - `docs/angle/index.html`は、このセッションでPlaywright(ヘッドレスChromium+フェイクカメラ
+    `--use-fake-device-for-media-stream`)を使い、`?mock=1`でのカメラ起動→手動「判定」→結果表示→
+    ログ1件記録(画像フィールドなし)→メインページ設定(`haeApp.settings.v1`)の読み取り専用の流用→
+    このページ専用の設定保存(`haeApp.angle.settings.v1`)がメインページの設定を書き換えないこと、
+    をコンソールエラー無しで確認した(このセッションで作成した一時的な確認用スクリプトによるもので、
+    リポジトリには含めていない)。実機のカメラ・実際の判定APIでの確認ではない。
